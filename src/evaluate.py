@@ -2,17 +2,16 @@
 
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from sklearn.metrics import (
-    accuracy_score,
-    precision_recall_fscore_support,
-)
+from sklearn.metrics import accuracy_score, precision_recall_fscore_support
 from torch.utils.data import DataLoader
 
 from utils.visualization import plot_confusion_matrix, print_classification_report
@@ -114,6 +113,8 @@ class Evaluator:
         class_report = print_classification_report(
             all_targets, all_predictions, class_names
         )
+        class_report_df = pd.DataFrame(class_report).transpose()
+        class_report_df.to_csv(self.output_dir / "classification_report.csv")
 
         # Top-k accuracy
         top3_accuracy = self._calculate_topk_accuracy(
@@ -127,6 +128,8 @@ class Evaluator:
         per_class_metrics = self._calculate_per_class_metrics(
             all_targets, all_predictions, all_probabilities, class_names
         )
+        per_class_metrics_df = pd.DataFrame(per_class_metrics).transpose()
+        per_class_metrics_df.to_csv(self.output_dir / "per_class_metrics.csv")
 
         # Create results dictionary
         results = {
@@ -163,7 +166,9 @@ class Evaluator:
             cm_path = self.output_dir / "confusion_matrix.png"
             cm_fig.savefig(cm_path)
 
-            logger.info(f"Evaluation results saved to {self.output_dir}")
+            logger.info(
+                f"Evaluation results saved to {os.path.relpath(self.output_dir)}"
+            )
 
         return results
 

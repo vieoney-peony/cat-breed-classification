@@ -10,8 +10,10 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.optim as optim
+import torchvision
 import yaml
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
 from utils.data_utils import print_training_config
@@ -33,6 +35,7 @@ class CatBreedTrainer:
         lr_scheduler: Optional[torch.optim.lr_scheduler._LRScheduler] = None,
         device: str = "cuda",
         checkpoint_dir: Union[str, Path] = "checkpoints",
+        use_tensorboard: bool = True,
     ):
         """
         Initialize the trainer.
@@ -45,7 +48,7 @@ class CatBreedTrainer:
             optimizer: Optimizer
             lr_scheduler: Learning rate scheduler
             device: Device to use for training
-            checkpoint_dir: Directory to save checkpoints
+            checkpoint_dir: Directory to save checkpoints            use_tensorboard: Whether to use TensorBoard for monitoring training
         """
         self.model = model
         self.train_loader = train_loader
@@ -55,14 +58,19 @@ class CatBreedTrainer:
         self.criterion = criterion or nn.CrossEntropyLoss()
 
         # Use AdamW optimizer by default
-        self.optimizer = optimizer or optim.AdamW(
+        self.optimizer = optimizer or optim.Adam(
             model.parameters(), lr=0.001, weight_decay=1e-4
         )
         self.lr_scheduler = lr_scheduler
         self.device = device if torch.cuda.is_available() else "cpu"
+        self.use_tensorboard = use_tensorboard
 
         # Set up checkpoint directory with backbone name and timestamp
-        backbone_name = getattr(model, "backbone_name", type(model).__name__)
+        backbone_name = (
+            model._backbone_name
+            if hasattr(model, "_backbone_name")
+            else type(model).__name__
+        )
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.base_checkpoint_dir = Path(checkpoint_dir)
         self.checkpoint_dir = self.base_checkpoint_dir / f"{backbone_name}_{timestamp}"
@@ -71,6 +79,17 @@ class CatBreedTrainer:
         # Store the best model path for easy reference
         self.best_model_path = self.checkpoint_dir / "best_state.pth"
         self.last_model_path = self.checkpoint_dir / "last_state.pth"
+
+        # Set up TensorBoard writer
+        self.tb_log_dir = self.checkpoint_dir / "tensorboard_logs"
+        if self.use_tensorboard:
+            os.makedirs(self.tb_log_dir, exist_ok=True)
+            self.writer = SummaryWriter(log_dir=self.tb_log_dir)
+            logger.info(
+                f"TensorBoard logs will be saved to {os.path.relpath(self.tb_log_dir)}"
+            )
+        else:
+            self.writer = None
 
         # Move model to device
         self.model.to(self.device)
@@ -190,11 +209,40 @@ class CatBreedTrainer:
         """
         best_val_loss = float("inf")
         best_val_acc = 0.0
-        patience_counter = 0  # Create training configuration dictionary
+        patience_counter = 0
+
+        # Log model graph and a batch of training images to TensorBoard
+        if self.use_tensorboard and self.writer:
+            # Get a batch of training data to visualize
+            try:
+                sample_batch, _ = next(iter(self.train_loader))
+                sample_batch = sample_batch[:8]  # Take only first 8 images
+
+                # Add model graph to TensorBoard
+                if torch.cuda.is_available():
+                    # Create a CPU model copy for graph visualization to avoid CUDA issues
+                    temp_model = type(self.model)()
+                    temp_model.load_state_dict(self.model.state_dict())
+                    self.writer.add_graph(temp_model.cpu(), sample_batch.cpu())
+                else:
+                    self.writer.add_graph(self.model, sample_batch)
+
+                # Add sample images to TensorBoard
+                grid = torchvision.utils.make_grid(sample_batch, normalize=True)
+                self.writer.add_image("Sample training images", grid, 0)
+                logger.info("Model graph and sample images added to TensorBoard")
+            except Exception as e:
+                logger.warning(f"Could not add model graph to TensorBoard: {e}")
+
+        # Create training configuration dictionary
         training_config = {
-            "backbone": getattr(self.model, "backbone_name", type(self.model).__name__),
+            "backbone": (
+                self.model._backbone_name
+                if hasattr(self.model, "_backbone_name")
+                else "unknown"
+            ),
             "pretrained": True,  # Assuming pretrained is used
-            "dropout_rate": 0.5,  # Default value, could be extracted from model if needed
+            "dropout_rate": 0.1,  # Default value, could be extracted from model if needed
             "num_classes": (
                 self.model.classifier.out_features
                 if hasattr(self.model, "classifier")
@@ -213,7 +261,7 @@ class CatBreedTrainer:
             "training_start_time": datetime.datetime.now().strftime(
                 "%Y-%m-%d %H:%M:%S"
             ),
-            "checkpoint_dir": str(self.checkpoint_dir),
+            "checkpoint_dir": os.path.relpath(self.checkpoint_dir),
         }
 
         # Save training configuration as YAML
@@ -240,14 +288,20 @@ class CatBreedTrainer:
                 self.lr_scheduler.step(val_loss)
 
             # Get current learning rate
-            current_lr = self.optimizer.param_groups[0]["lr"]
-
-            # Update history
+            current_lr = self.optimizer.param_groups[0]["lr"]  # Update history
             self.history["train_loss"].append(train_loss)
             self.history["train_acc"].append(train_acc)
             self.history["val_loss"].append(val_loss)
             self.history["val_acc"].append(val_acc)
             self.history["learning_rates"].append(current_lr)
+
+            # Log metrics to TensorBoard
+            if self.use_tensorboard and self.writer:
+                self.writer.add_scalar("Loss/train", train_loss, epoch)
+                self.writer.add_scalar("Loss/val", val_loss, epoch)
+                self.writer.add_scalar("Accuracy/train", train_acc, epoch)
+                self.writer.add_scalar("Accuracy/val", val_acc, epoch)
+                self.writer.add_scalar("Learning_rate", current_lr, epoch)
 
             epoch_time = time.time() - epoch_start
 
@@ -304,6 +358,15 @@ class CatBreedTrainer:
         )  # Plot learning curves at the end of training
         fig = plot_learning_curves(self.history)
         fig.savefig(self.checkpoint_dir / "learning_curves.png")
+
+        # Close TensorBoard writer
+        if self.use_tensorboard and self.writer:
+            self.writer.close()
+            logger.info(f"TensorBoard logs saved to {os.path.relpath(self.tb_log_dir)}")
+            logger.info(
+                "To view logs, run: tensorboard --logdir=%s",
+                os.path.relpath(self.tb_log_dir),
+            )
 
         # Save final class names if available
         if hasattr(self.train_loader.dataset, "class_names"):

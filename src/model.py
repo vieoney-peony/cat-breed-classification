@@ -10,6 +10,7 @@ import torch.nn as nn
 import torchvision
 import torchvision.models as models
 from torchsummary import summary
+from torchview import draw_graph
 
 LIST_BACKBONES = models.list_models(module=torchvision.models)
 
@@ -39,6 +40,8 @@ class CatBreedClassifier(nn.Module):
         """
         super().__init__()
 
+        self._backbone_name = backbone
+
         if backbone not in LIST_BACKBONES:
             raise ValueError(
                 f"Unsupported backbone: {backbone}. Available backbones: {LIST_BACKBONES}"
@@ -52,7 +55,7 @@ class CatBreedClassifier(nn.Module):
         feature_dim = (
             self.backbone.fc.in_features
             if hasattr(self.backbone, "fc")
-            else self.backbone.classifier[1].in_features
+            else self.backbone.classifier[-1].in_features
         )
 
         if hasattr(self.backbone, "fc"):
@@ -96,13 +99,17 @@ def create_model(num_classes: int, model_config: Dict[str, Any] = None) -> nn.Mo
     backbone = model_config.get("backbone", "shufflenet_v2")
     pretrained = model_config.get("pretrained", True)
     dropout_rate = model_config.get("dropout_rate", 0.5)
-
-    return CatBreedClassifier(
+    model = CatBreedClassifier(
         num_classes=num_classes,
         backbone=backbone,
         pretrained=pretrained,
         dropout_rate=dropout_rate,
     )
+    summary(model, input_size=(3, 224, 224), device=device)
+    model_graph = draw_graph(model, input_size=(1, 3, 224, 224), expand_nested=True)
+    model_graph.visual_graph.render(f"../figures/model_graph_{backbone}.png")
+
+    return model
 
 
 def save_model(
@@ -146,12 +153,12 @@ def save_model(
 
         # Save the model
         torch.save(save_dict, save_path)
-        logger.info(f"Model saved to {save_path}")
+        logger.info(f"Model saved to {os.path.relpath(save_path)}")
     else:
         # Save the entire model
         os.makedirs(os.path.dirname(save_path), exist_ok=True)
         torch.save(model, save_path)
-        logger.info(f"Model saved to {save_path} as a complete model")
+        logger.info(f"Model saved to {os.path.relpath(save_path)} as a complete model")
 
 
 def load_model(
@@ -175,15 +182,17 @@ def load_model(
 
     # Load checkpoint
     if model_config is None:
+        print(f"Loading model from {os.path.relpath(path)} without config")
         model = torch.load(path, map_location=torch.device(device), weights_only=False)
     else:
+        print(f"Loading model from {os.path.relpath(path)} with config: {model_config}")
         checkpoint = torch.load(path, map_location=torch.device(device))
         # Create model
         model = create_model(num_classes=num_classes, model_config=model_config)
         # Load weights
         model.load_state_dict(checkpoint["model_state_dict"])
 
-    logger.info(f"Loaded model from {path}")
+    logger.info(f"Loaded model from {os.path.relpath(path)}")
 
     return model
 

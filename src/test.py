@@ -41,7 +41,7 @@ class CatBreedPredictor:
         self.img_size = img_size
 
         # Load model
-        self.model, _ = load_model(model_path, num_classes=len(class_names))
+        self.model = load_model(model_path, num_classes=len(class_names))
         self.model.to(self.device)
         self.model.eval()
 

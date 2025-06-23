@@ -1,0 +1,14 @@
+backbone: mobilenet_v3_small
+batch_size: 32
+checkpoint_dir: src/checkpoints/mobilenet_v3_small_20250622_230358
+device: cuda
+dropout_rate: 0.5
+early_stopping: 5
+epochs: 30
+learning_rate: 0.001
+num_classes: 21
+optimizer: AdamW
+pretrained: true
+scheduler: ReduceLROnPlateau
+training_start_time: "2025-06-22 23:03:58"
+weight_decay: 0.0001

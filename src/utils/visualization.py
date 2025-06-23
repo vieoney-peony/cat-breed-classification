@@ -158,7 +158,6 @@ def print_classification_report(
     # Print the report as a formatted table
     df_report = pd.DataFrame(report).transpose()
     print(df_report)
-
     return report
 
 

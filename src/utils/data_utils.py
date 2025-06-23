@@ -128,7 +128,7 @@ class CatBreedDataset(Dataset):
         data_dir: Union[str, Path],
         transform: Optional[Callable] = None,
         split: str = "train",
-        val_ratio: float = 0.2,
+        val_ratio: float = 0.1,
         test_ratio: float = 0.1,
         random_seed: int = 42,
     ):
