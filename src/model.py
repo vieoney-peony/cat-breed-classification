@@ -2,6 +2,7 @@
 
 import logging
 import os
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -12,6 +13,8 @@ import torchvision.models as models
 from torchsummary import summary
 from torchview import draw_graph
 
+warnings.filterwarnings("ignore", category=FutureWarning)
+
 LIST_BACKBONES = models.list_models(module=torchvision.models)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -19,13 +22,81 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger = logging.getLogger(__name__)
 
 
-class CatBreedClassifier(nn.Module):
-    """Cat breed classification model using pre-trained backbone."""
+class CatEmotionClassifier(nn.Module):
+    """Cat emotion classification model using pre-trained backbone."""
+
+    __type__ = "emotion"
 
     def __init__(
         self,
         num_classes: int,
-        backbone: str = "alexnet",
+        backbone: str = "mobilenet_v2",
+        pretrained: bool = True,
+        dropout_rate: float = 0.5,
+    ):
+        """
+        Initialize the emotion model.
+
+        Args:
+            num_classes: Number of emotion classes to predict
+            backbone: Model backbone (e.g. mobilenetv2, efficientnet_b0)
+            pretrained: Whether to use pre-trained weights
+            dropout_rate: Dropout rate for classifier head
+        """
+        super().__init__()
+
+        self._backbone_name = backbone
+
+        if backbone not in LIST_BACKBONES:
+            raise ValueError(
+                f"Unsupported backbone: {backbone}. Available backbones: {LIST_BACKBONES}"
+            )
+
+        # Load the backbone model
+        if pretrained:
+            self.backbone = models.get_model(backbone, weights="DEFAULT")
+        else:
+            self.backbone = models.get_model(backbone, weights=None)
+
+        feature_dim = (
+            self.backbone.fc.in_features
+            if hasattr(self.backbone, "fc")
+            else self.backbone.classifier[-1].in_features
+        )
+
+        if hasattr(self.backbone, "fc"):
+            self.backbone.fc = nn.Identity()
+        elif hasattr(self.backbone, "classifier"):
+            self.backbone.classifier[-1] = nn.Identity()
+
+        # Create classifier head with dropout
+        self.classifier = nn.Linear(feature_dim, num_classes)
+
+        logger.info(f"Created {backbone} emotion model with {num_classes} emotion classes")
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Forward pass.
+
+        Args:
+            x: Input tensor
+
+        Returns:
+            Emotion class logits
+        """
+        features = self.backbone(x)
+        return self.classifier(features)
+
+
+class CatBreedClassifier(nn.Module):
+    """Cat breed classification model using pre-trained backbone."""
+
+    __type__ = "breed"
+
+    def __init__(
+        self,
+        num_classes: int,
+        backbone: str = "mobilenet_v2",
         pretrained: bool = True,
         dropout_rate: float = 0.5,
     ):
@@ -82,13 +153,16 @@ class CatBreedClassifier(nn.Module):
         return self.classifier(features)
 
 
-def create_model(num_classes: int, model_config: Dict[str, Any] = None) -> nn.Module:
+def create_model(
+    num_classes: int, model_config: Dict[str, Any] = None, model_type: str = "breed"
+) -> nn.Module:
     """
-    Create a cat breed classifier model.
+    Create a cat classifier model.
 
     Args:
         num_classes: Number of output classes
         model_config: Model configuration dictionary
+        model_type: Type of model to create ("breed" or "emotion")
 
     Returns:
         Initialized model
@@ -96,18 +170,28 @@ def create_model(num_classes: int, model_config: Dict[str, Any] = None) -> nn.Mo
     if model_config is None:
         model_config = {}
 
-    backbone = model_config.get("backbone", "shufflenet_v2")
+    backbone = model_config.get("backbone", "mobilenet_v2")
     pretrained = model_config.get("pretrained", True)
-    dropout_rate = model_config.get("dropout_rate", 0.5)
-    model = CatBreedClassifier(
-        num_classes=num_classes,
-        backbone=backbone,
-        pretrained=pretrained,
-        dropout_rate=dropout_rate,
-    )
-    summary(model, input_size=(3, 224, 224), device=device)
-    model_graph = draw_graph(model, input_size=(1, 3, 224, 224), expand_nested=True)
-    model_graph.visual_graph.render(f"../figures/model_graph_{backbone}.png")
+    dropout_rate = model_config.get("dropout_rate", 0.2)
+
+    if model_type == "emotion":
+        model = CatEmotionClassifier(
+            num_classes=num_classes,
+            backbone=backbone,
+            pretrained=pretrained,
+            dropout_rate=dropout_rate,
+        )
+    else:  # Default to breed
+        model = CatBreedClassifier(
+            num_classes=num_classes,
+            backbone=backbone,
+            pretrained=pretrained,
+            dropout_rate=dropout_rate,
+        )
+
+    # summary(model, input_size=(3, 224, 224), device=device)
+    # model_graph = draw_graph(model, input_size=(1, 3, 224, 224), expand_nested=True)
+    # model_graph.visual_graph.render(f"../figures/model_graph_{backbone}_{model_type}.png")
 
     return model
 
@@ -165,7 +249,8 @@ def load_model(
     path: Union[str, Path],
     num_classes: int,
     model_config: Optional[Dict[str, Any]] = None,
-) -> Tuple[nn.Module, Dict[str, Any]]:
+    model_type: str = "breed",
+) -> nn.Module:
     """
     Load model from checkpoint.
 
@@ -173,9 +258,10 @@ def load_model(
         path: Path to the checkpoint
         num_classes: Number of output classes
         model_config: Model configuration
+        model_type: Type of model to load ("breed" or "emotion")
 
     Returns:
-        Tuple of (model, checkpoint_data)
+        Loaded model
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"Checkpoint not found: {path}")
@@ -188,11 +274,13 @@ def load_model(
         print(f"Loading model from {os.path.relpath(path)} with config: {model_config}")
         checkpoint = torch.load(path, map_location=torch.device(device))
         # Create model
-        model = create_model(num_classes=num_classes, model_config=model_config)
+        model = create_model(
+            num_classes=num_classes, model_config=model_config, model_type=model_type
+        )
         # Load weights
         model.load_state_dict(checkpoint["model_state_dict"])
 
-    logger.info(f"Loaded model from {os.path.relpath(path)}")
+    logger.info(f"Loaded {model_type} model from {os.path.relpath(path)}")
 
     return model
 

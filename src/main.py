@@ -14,14 +14,14 @@ import yaml
 
 from evaluate import Evaluator
 from model import create_model, load_model
-from trainer import CatBreedTrainer
+from trainer import CatModelTrainer
 from utils.data_utils import get_data_loaders
 from utils.visualization import setup_logger
 
 # Set up paths
 ROOT_DIR = Path(__file__).parent
 CHECKPOINT_DIR = ROOT_DIR / "checkpoints"
-DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT_DIR.parent / "data" / "processed"))
+DATA_DIR = Path(os.environ.get("DATA_DIR", ROOT_DIR.parent / "data"))
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 
 # Create logger
@@ -70,16 +70,17 @@ def parse_args():
         default="cuda" if torch.cuda.is_available() else "cpu",
         help="Device to use (cuda or cpu)",
     )
-    parser.add_argument(
-        "--log-file", type=str, help="Log file path"
-    )  # Training arguments
-    parser.add_argument(
-        "--epochs", type=int, default=30, help="Number of training epochs"
-    )
+    parser.add_argument("--log-file", type=str, help="Log file path")  # Training arguments
+    parser.add_argument("--epochs", type=int, default=30, help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=0.001, help="Learning rate")
     parser.add_argument("--weight-decay", type=float, default=1e-4, help="Weight decay")
+    parser.add_argument("--patience", type=int, default=10, help="Early stopping patience")
     parser.add_argument(
-        "--patience", type=int, default=5, help="Early stopping patience"
+        "--mode",
+        type=str,
+        choices=["breed", "emotion"],
+        default="breed",
+        help="Training mode: breed classification or emotion recognition",
     )
     parser.add_argument(
         "--use-tensorboard",
@@ -89,9 +90,7 @@ def parse_args():
     )
 
     # Testing/evaluation arguments
-    parser.add_argument(
-        "--output-dir", type=str, help="Output directory for evaluation results"
-    )
+    parser.add_argument("--output-dir", type=str, help="Output directory for evaluation results")
 
     # Prediction arguments
     parser.add_argument("--input", type=str, help="Input image or video path")
@@ -116,9 +115,7 @@ def load_and_update_config(args):
     # Store which CLI args were explicitly provided
     cli_parser = argparse.ArgumentParser()
     cli_args, _ = cli_parser.parse_known_args()
-    explicitly_provided = {
-        key: True for key, val in vars(cli_args).items() if val is not None
-    }
+    explicitly_provided = {key: True for key, val in vars(cli_args).items() if val is not None}
 
     if not args.config_path:
         return args
@@ -148,9 +145,7 @@ def load_and_update_config(args):
         )
         default_parser.add_argument("--config-path", type=str)
         default_parser.add_argument("--data-dir", type=str, default=str(DATA_DIR))
-        default_parser.add_argument(
-            "--checkpoint-dir", type=str, default=str(CHECKPOINT_DIR)
-        )
+        default_parser.add_argument("--checkpoint-dir", type=str, default=str(CHECKPOINT_DIR))
         default_parser.add_argument("--model-path", type=str)
         default_parser.add_argument("--backbone", type=str, default="mobilenetv2")
         default_parser.add_argument("--batch-size", type=int, default=32)
@@ -164,15 +159,14 @@ def load_and_update_config(args):
         default_parser.add_argument("--lr", type=float, default=0.001)
         default_parser.add_argument("--weight-decay", type=float, default=1e-4)
         default_parser.add_argument("--patience", type=int, default=10)
+        default_parser.add_argument("--mode", type=str, default="breed")
         default_parser.add_argument("--output-dir", type=str)
         default_parser.add_argument("--input", type=str)
         default_parser.add_argument("--output", type=str)
         default_parser.add_argument("--camera-id", type=int, default=0)
 
         default_args = default_parser.parse_args([args.command])
-        default_arg_values = vars(
-            default_args
-        )  # Handle special case for training_config.yaml
+        default_arg_values = vars(default_args)  # Handle special case for training_config.yaml
         if "training_config.yaml" in str(config_path):
             # For training configs, we should use the directory containing the config
             # as the checkpoint_dir if we're in evaluation mode
@@ -199,6 +193,7 @@ def load_and_update_config(args):
             "data_dir": "data_dir",
             "output_dir": "output_dir",
             "model_path": "model_path",
+            "mode": "mode",
             "dropout_rate": None,  # Ignore - not a CLI argument
             "pretrained": None,  # Ignore - not a CLI argument
             "num_classes": None,  # Ignore - not a CLI argument
@@ -214,12 +209,9 @@ def load_and_update_config(args):
 
             # Apply config values if available and not explicitly set via CLI
             if config_key in config and arg_name not in explicitly_provided:
-                logger.debug(
-                    f"Setting {arg_name} = {config[config_key]} from config file"
-                )
-                args_dict[arg_name] = config[
-                    config_key
-                ]  # Print the final configuration used
+                logger.debug(f"Setting {arg_name} = {config[config_key]} from config file")
+                args_dict[arg_name] = config[config_key]  # Print the final configuration used
+
         logger.info("Final configuration:")
         for key, value in args_dict.items():
             if key != "command" and key != "config_path":
@@ -233,11 +225,11 @@ def load_and_update_config(args):
 
 def train(args):
     """Train a model."""
-    logger.info(f"Starting training with {args.backbone} backbone")
+    logger.info(f"Starting training with {args.backbone} backbone in {args.mode} mode")
 
     # Load data
     data_loaders = get_data_loaders(
-        data_dir=args.data_dir,
+        data_dir=str(args.data_dir),
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         img_size=args.img_size,
@@ -250,17 +242,17 @@ def train(args):
     # Create model
     model_config = {"backbone": args.backbone, "pretrained": True, "dropout_rate": 0.1}
 
-    model = create_model(num_classes=len(class_names), model_config=model_config)
+    model = create_model(
+        num_classes=len(class_names), model_config=model_config, model_type=args.mode
+    )
 
     # Create optimizer and scheduler
-    optimizer = optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay
-    )
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.2, patience=20, min_lr=1e-6
     )  # Create trainer
-    trainer = CatBreedTrainer(
+    trainer = CatModelTrainer(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -293,20 +285,14 @@ def evaluate(args):
         if os.path.exists(best_model_path):
             model_path = best_model_path
             model_dir = config_dir
-            logger.info(
-                f"Using model from config directory: {os.path.relpath(model_path)}"
-            )
+            logger.info(f"Using model from config directory: {os.path.relpath(model_path)}")
         elif os.path.exists(last_model_path):
             model_path = last_model_path
             model_dir = config_dir
-            logger.info(
-                f"Using model from config directory: {os.path.relpath(model_path)}"
-            )
+            logger.info(f"Using model from config directory: {os.path.relpath(model_path)}")
         else:
             # Fall back to normal path resolution
-            logger.info(
-                "No model found in config directory, using standard model path resolution"
-            )
+            logger.info("No model found in config directory, using standard model path resolution")
             model_path = None
             model_dir = None
     else:
@@ -340,9 +326,7 @@ def evaluate(args):
             model_path = model_dir / "last_state.pth"
 
         if not model_path.exists():
-            logger.error(
-                f"No model checkpoint files found in {os.path.relpath(model_dir)}"
-            )
+            logger.error(f"No model checkpoint files found in {os.path.relpath(model_dir)}")
             sys.exit(1)
 
     logger.info(f"Using model checkpoint: {os.path.relpath(model_path)}")
@@ -394,9 +378,7 @@ def evaluate(args):
     logger.info(f"Accuracy: {results['accuracy']:.4f}")
     logger.info(f"F1 Score: {results['f1_score']:.4f}")
     logger.info(f"Top-3 Accuracy: {results['top3_accuracy']:.4f}")
-    logger.info(
-        f"Average Inference Time: {results['avg_inference_time_ms']:.2f} ms/sample"
-    )
+    logger.info(f"Average Inference Time: {results['avg_inference_time_ms']:.2f} ms/sample")
 
 
 def predict(args):
@@ -423,20 +405,14 @@ def predict(args):
         if os.path.exists(best_model_path):
             model_path = best_model_path
             model_dir = config_dir
-            logger.info(
-                f"Using model from config directory: {os.path.relpath(model_path)}"
-            )
+            logger.info(f"Using model from config directory: {os.path.relpath(model_path)}")
         elif os.path.exists(last_model_path):
             model_path = last_model_path
             model_dir = config_dir
-            logger.info(
-                f"Using model from config directory: {os.path.relpath(model_path)}"
-            )
+            logger.info(f"Using model from config directory: {os.path.relpath(model_path)}")
         else:
             # Fall back to normal path resolution
-            logger.info(
-                "No model found in config directory, using standard model path resolution"
-            )
+            logger.info("No model found in config directory, using standard model path resolution")
             model_path = None
             model_dir = None
     else:
@@ -470,9 +446,7 @@ def predict(args):
             model_path = model_dir / "last_state.pth"
 
         if not model_path.exists():
-            logger.error(
-                f"No model checkpoint files found in {os.path.relpath(model_dir)}"
-            )
+            logger.error(f"No model checkpoint files found in {os.path.relpath(model_dir)}")
             sys.exit(1)
 
     logger.info(f"Using model checkpoint: {os.path.relpath(model_path)}")
@@ -536,20 +510,14 @@ def process_video(args):
         if os.path.exists(best_model_path):
             model_path = best_model_path
             model_dir = config_dir
-            logger.info(
-                f"Using model from config directory: {os.path.relpath(model_path)}"
-            )
+            logger.info(f"Using model from config directory: {os.path.relpath(model_path)}")
         elif os.path.exists(last_model_path):
             model_path = last_model_path
             model_dir = config_dir
-            logger.info(
-                f"Using model from config directory: {os.path.relpath(model_path)}"
-            )
+            logger.info(f"Using model from config directory: {os.path.relpath(model_path)}")
         else:
             # Fall back to normal path resolution
-            logger.info(
-                "No model found in config directory, using standard model path resolution"
-            )
+            logger.info("No model found in config directory, using standard model path resolution")
             model_path = None
             model_dir = None
     else:
@@ -583,9 +551,7 @@ def process_video(args):
             model_path = model_dir / "last_state.pth"
 
         if not model_path.exists():
-            logger.error(
-                f"No model checkpoint files found in {os.path.relpath(model_dir)}"
-            )
+            logger.error(f"No model checkpoint files found in {os.path.relpath(model_dir)}")
             sys.exit(1)
 
     logger.info(f"Using model checkpoint: {os.path.relpath(model_path)}")
@@ -639,20 +605,14 @@ def run_webcam(args):
         if os.path.exists(best_model_path):
             model_path = best_model_path
             model_dir = config_dir
-            logger.info(
-                f"Using model from config directory: {os.path.relpath(model_path)}"
-            )
+            logger.info(f"Using model from config directory: {os.path.relpath(model_path)}")
         elif os.path.exists(last_model_path):
             model_path = last_model_path
             model_dir = config_dir
-            logger.info(
-                f"Using model from config directory: {os.path.relpath(model_path)}"
-            )
+            logger.info(f"Using model from config directory: {os.path.relpath(model_path)}")
         else:
             # Fall back to normal path resolution
-            logger.info(
-                "No model found in config directory, using standard model path resolution"
-            )
+            logger.info("No model found in config directory, using standard model path resolution")
             model_path = None
             model_dir = None
     else:
@@ -686,9 +646,7 @@ def run_webcam(args):
             model_path = model_dir / "last_state.pth"
 
         if not model_path.exists():
-            logger.error(
-                f"No model checkpoint files found in {os.path.relpath(model_dir)}"
-            )
+            logger.error(f"No model checkpoint files found in {os.path.relpath(model_dir)}")
             sys.exit(1)
 
     logger.info(f"Using model checkpoint: {os.path.relpath(model_path)}")
@@ -726,6 +684,16 @@ def main():
     """Main entry point."""
     args = parse_args()
     args = load_and_update_config(args)
+    # Set data directory based on mode
+
+    if args.mode == "emotion":
+        args.data_dir = Path(args.data_dir) / "data-emo" / "processed"
+    else:
+        args.data_dir = Path(args.data_dir) / "data-breed" / "processed"
+
+    if not args.data_dir.exists():
+        logger.error(f"Data directory not found: {os.path.relpath(args.data_dir)}")
+        sys.exit(1)
 
     # Set up logging
     setup_logger(args.log_file)

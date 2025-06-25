@@ -22,8 +22,8 @@ from utils.visualization import plot_learning_curves
 logger = logging.getLogger(__name__)
 
 
-class CatBreedTrainer:
-    """Trainer class for cat breed classification."""
+class CatModelTrainer:
+    """Trainer class for cat breed, emotion classification."""
 
     def __init__(
         self,
@@ -58,22 +58,20 @@ class CatBreedTrainer:
         self.criterion = criterion or nn.CrossEntropyLoss()
 
         # Use AdamW optimizer by default
-        self.optimizer = optimizer or optim.Adam(
-            model.parameters(), lr=0.001, weight_decay=1e-4
-        )
+        self.optimizer = optimizer or optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-4)
         self.lr_scheduler = lr_scheduler
         self.device = device if torch.cuda.is_available() else "cpu"
         self.use_tensorboard = use_tensorboard
 
         # Set up checkpoint directory with backbone name and timestamp
         backbone_name = (
-            model._backbone_name
-            if hasattr(model, "_backbone_name")
-            else type(model).__name__
+            model._backbone_name if hasattr(model, "_backbone_name") else type(model).__name__
         )
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.base_checkpoint_dir = Path(checkpoint_dir)
-        self.checkpoint_dir = self.base_checkpoint_dir / f"{backbone_name}_{timestamp}"
+        self.checkpoint_dir = (
+            self.base_checkpoint_dir / f"{self.model.__type__}_{backbone_name}_{timestamp}"
+        )
         os.makedirs(self.checkpoint_dir, exist_ok=True)
 
         # Store the best model path for easy reference
@@ -85,9 +83,7 @@ class CatBreedTrainer:
         if self.use_tensorboard:
             os.makedirs(self.tb_log_dir, exist_ok=True)
             self.writer = SummaryWriter(log_dir=self.tb_log_dir)
-            logger.info(
-                f"TensorBoard logs will be saved to {os.path.relpath(self.tb_log_dir)}"
-            )
+            logger.info(f"TensorBoard logs will be saved to {os.path.relpath(self.tb_log_dir)}")
         else:
             self.writer = None
 
@@ -143,9 +139,7 @@ class CatBreedTrainer:
             correct += predicted.eq(targets).sum().item()
 
             # Update progress bar
-            pbar.set_postfix(
-                {"loss": total_loss / (pbar.n + 1), "acc": 100.0 * correct / total}
-            )
+            pbar.set_postfix({"loss": total_loss / (pbar.n + 1), "acc": 100.0 * correct / total})
 
         avg_loss = total_loss / len(self.train_loader)
         accuracy = 100.0 * correct / total
@@ -237,30 +231,22 @@ class CatBreedTrainer:
         # Create training configuration dictionary
         training_config = {
             "backbone": (
-                self.model._backbone_name
-                if hasattr(self.model, "_backbone_name")
-                else "unknown"
+                self.model._backbone_name if hasattr(self.model, "_backbone_name") else "unknown"
             ),
             "pretrained": True,  # Assuming pretrained is used
             "dropout_rate": 0.1,  # Default value, could be extracted from model if needed
             "num_classes": (
-                self.model.classifier.out_features
-                if hasattr(self.model, "classifier")
-                else None
+                self.model.classifier.out_features if hasattr(self.model, "classifier") else None
             ),
             "optimizer": self.optimizer.__class__.__name__,
             "learning_rate": self.optimizer.param_groups[0]["lr"],
             "weight_decay": self.optimizer.param_groups[0].get("weight_decay", 0),
-            "scheduler": self.lr_scheduler.__class__.__name__
-            if self.lr_scheduler
-            else None,
+            "scheduler": self.lr_scheduler.__class__.__name__ if self.lr_scheduler else None,
             "epochs": epochs,
             "batch_size": self.train_loader.batch_size,
             "early_stopping": early_stopping_patience,
             "device": self.device,
-            "training_start_time": datetime.datetime.now().strftime(
-                "%Y-%m-%d %H:%M:%S"
-            ),
+            "training_start_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "checkpoint_dir": os.path.relpath(self.checkpoint_dir),
         }
 
@@ -325,9 +311,7 @@ class CatBreedTrainer:
                     val_acc=val_acc,
                     is_best=True,
                 )
-                logger.info(
-                    f"New best model saved with validation loss: {val_loss:.4f}"
-                )
+                logger.info(f"New best model saved with validation loss: {val_loss:.4f}")
             else:
                 patience_counter += 1
 
@@ -375,9 +359,7 @@ class CatBreedTrainer:
             with open(self.checkpoint_dir / "class_names.json", "w") as f:
                 json.dump(self.train_loader.dataset.class_names, f)
 
-        logger.info(
-            f"Training artifacts saved to {os.path.relpath(self.checkpoint_dir)}"
-        )
+        logger.info(f"Training artifacts saved to {os.path.relpath(self.checkpoint_dir)}")
         return self.history
 
     def save_checkpoint(
@@ -425,17 +407,13 @@ class CatBreedTrainer:
         """
         if path is None:
             # Look for best model in the checkpoint directory
-            if hasattr(self, "best_model_path") and os.path.exists(
-                self.best_model_path
-            ):
+            if hasattr(self, "best_model_path") and os.path.exists(self.best_model_path):
                 path = self.best_model_path
             else:
                 # Look in the checkpoint directory for any model files
                 checkpoint_files = list(self.checkpoint_dir.glob("*.pth"))
                 if not checkpoint_files:
-                    logger.error(
-                        "No checkpoint files found in the checkpoint directory"
-                    )
+                    logger.error("No checkpoint files found in the checkpoint directory")
                     return 0
                 path = checkpoint_files[0]  # Use first available checkpoint
 
